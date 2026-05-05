@@ -139,46 +139,32 @@ class IptvSimple:
     # ------------------------------------------------------------------
 
     def configure(self) -> None:
-        """Write settings via both the xbmcaddon API (Kodi 19) and direct XML
-        (Kodi 20+ multi-instance).  Both are idempotent and harmless to run."""
+        """Write settings via xbmcaddon API (writes to pvr.iptvsimple/settings.xml).
+        Also removes any empty instance-settings-*.xml that would shadow global settings."""
         self._configure_via_addon_api()
-        self._configure_via_instance_xml()
+        self._remove_empty_instance_settings()
 
     def _configure_via_addon_api(self) -> None:
-        """xbmcaddon.Addon.setSetting() writes to settings.xml and triggers
-        pvr.iptvsimple's migration path on Kodi 20+."""
         try:
             iptv_addon = xbmcaddon.Addon(IPTVSIMPLE_ID)
             for key, value in self._SETTINGS.items():
                 iptv_addon.setSetting(key, value)
         except Exception as exc:  # noqa: BLE001
-            xbmc.log(f'[{ADDON_ID}] xbmcaddon configure: {exc}', xbmc.LOGWARNING)
+            xbmc.log(f'[{ADDON_ID}] configure: {exc}', xbmc.LOGWARNING)
 
-    def _configure_via_instance_xml(self) -> None:
-        """Write instance-settings-1.xml for Kodi 20+ multi-instance PVR."""
+    def _remove_empty_instance_settings(self) -> None:
+        """Delete any instance-settings-*.xml that have no settings inside.
+        An empty instance XML overrides global settings.xml and results in 0 channels."""
         settings_dir = xbmcvfs.translatePath('special://userdata/addon_data/pvr.iptvsimple/')
-        os.makedirs(settings_dir, exist_ok=True)
-        settings_path = os.path.join(settings_dir, 'instance-settings-1.xml')
-
-        lines: list[str] = [
-            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n',
-            '<settings version="2">\n',
-        ]
-        for key, value in self._SETTINGS.items():
-            escaped = (
-                value
-                .replace('&', '&amp;')
-                .replace('<', '&lt;')
-                .replace('>', '&gt;')
-            )
-            lines.append(f'    <setting id="{key}">{escaped}</setting>\n')
-        lines.append('</settings>\n')
-
-        try:
-            with open(settings_path, 'w', encoding='utf-8') as fh:
-                fh.writelines(lines)
-        except OSError as exc:
-            xbmc.log(f'[{ADDON_ID}] instance-settings write: {exc}', xbmc.LOGWARNING)
+        import glob
+        for path in glob.glob(os.path.join(settings_dir, 'instance-settings-*.xml')):
+            try:
+                tree = ET.parse(path)
+                if len(tree.getroot()) == 0:          # no <setting> children
+                    os.remove(path)
+                    xbmc.log(f'[{ADDON_ID}] Removed empty {os.path.basename(path)}', xbmc.LOGINFO)
+            except Exception:  # noqa: BLE001
+                pass
 
     # ------------------------------------------------------------------
 
@@ -186,26 +172,32 @@ class IptvSimple:
         self._rpc('Addons.SetAddonEnabled', {'addonid': IPTVSIMPLE_ID, 'enabled': True})
 
     def force_reload(self) -> None:
-        """Disable then re-enable pvr.iptvsimple so it re-reads the M3U."""
+        """Disable then re-enable pvr.iptvsimple so it re-reads the M3U.
+        The empty instance-settings-*.xml must be removed BEFORE re-enabling
+        so pvr.iptvsimple falls back to settings.xml (which has the M3U path)."""
         self._rpc('Addons.SetAddonEnabled', {'addonid': IPTVSIMPLE_ID, 'enabled': False})
         xbmc.sleep(2000)
+        self._remove_empty_instance_settings()   # critical: remove before re-enable
         self._rpc('Addons.SetAddonEnabled', {'addonid': IPTVSIMPLE_ID, 'enabled': True})
+        xbmc.sleep(3000)                          # give PVR Manager time to sync channels
 
 
 # ---------------------------------------------------------------------------
 # Service — main loop
 # ---------------------------------------------------------------------------
 
+class _Monitor(xbmc.Monitor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.settings_changed = False
+
+    def onSettingsChanged(self) -> None:  # noqa: N802 — Kodi callback name
+        self.settings_changed = True
+
+
 class Service:
     def __init__(self) -> None:
-        self._settings_changed = False
-        monitor = xbmc.Monitor()
-        monitor.onSettingsChanged = self._on_settings_changed
-        self.monitor = monitor
-
-    def _on_settings_changed(self) -> None:
-        """Called by Kodi immediately when the user saves addon settings."""
-        self._settings_changed = True
+        self.monitor = _Monitor()
 
     # ------------------------------------------------------------------
 
@@ -257,8 +249,8 @@ class Service:
             # Wait up to 4 hours, but wake immediately if settings changed or Kodi exits.
             waited = 0
             while waited < REFRESH_INTERVAL and not self.monitor.abortRequested():
-                if self._settings_changed:
-                    self._settings_changed = False
+                if self.monitor.settings_changed:
+                    self.monitor.settings_changed = False
                     self._log('Settings changed — refreshing now')
                     break
                 self.monitor.waitForAbort(5)
