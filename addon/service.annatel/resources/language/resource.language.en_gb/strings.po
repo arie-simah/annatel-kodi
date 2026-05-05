@@ -1,0 +1,18 @@
+# Kodi Media Center language file
+# Addon Name: Annatel IPTV
+# Addon id: service.annatel
+# Addon Provider: annatel-kodi
+msgid ""
+msgstr ""
+
+msgctxt "#32000"
+msgid "General"
+msgstr ""
+
+msgctxt "#32001"
+msgid "Username"
+msgstr ""
+
+msgctxt "#32002"
+msgid "Password"
+msgstr ""

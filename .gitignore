@@ -1,0 +1,10 @@
+# Build output
+dist/
+
+# Kodi runtime files (if you symlink the addon dir locally)
+*.pyc
+__pycache__/
+
+# OS
+.DS_Store
+Thumbs.db
