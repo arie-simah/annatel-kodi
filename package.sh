@@ -9,8 +9,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ADDON_SRC="${SCRIPT_DIR}/addon/service.annatel"
 DIST_DIR="${SCRIPT_DIR}/dist"
 
-# Read version from addon.xml
-VERSION="$(grep -oP '(?<=version=")[^"]+' "${ADDON_SRC}/addon.xml" | head -1)"
+# Read version from addon.xml (the <addon> element's version attribute,
+# not the XML declaration's version="1.0" on the first line)
+VERSION="$(python3 -c "import xml.etree.ElementTree as ET; print(ET.parse('${ADDON_SRC}/addon.xml').getroot().get('version'))")"
 
 ZIP_NAME="service.annatel-${VERSION}.zip"
 ZIP_PATH="${DIST_DIR}/${ZIP_NAME}"

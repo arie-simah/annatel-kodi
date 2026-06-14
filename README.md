@@ -10,8 +10,11 @@ A Kodi service addon that automatically fetches your [Annatel](https://www.annat
 
 1. At startup the addon calls the Annatel API with your credentials
 2. Writes a local M3U playlist of all your channels
-3. Configures and reloads [IPTV Simple Client](https://github.com/kodi-pvr/pvr.iptvsimple) automatically
-4. Refreshes every 4 hours
+3. Serves that playlist over a local HTTP URL (`http://127.0.0.1:<port>/channels.m3u`)
+4. Configures [IPTV Simple Client](https://github.com/kodi-pvr/pvr.iptvsimple) to load the playlist from that URL and reloads it automatically
+5. Refreshes every 4 hours
+
+The playlist is served over loopback HTTP (rather than handed to IPTV Simple Client as a local file path) because on Android, `pvr.iptvsimple` runs as a separate sandboxed process/app and cannot read files from this addon's `special://profile` directory. A local HTTP URL works regardless of that sandboxing.
 
 ---
 
@@ -99,3 +102,6 @@ annatel-kodi/
 
 **Android TV crash on startup**
 - Make sure you are running Kodi 20+ (the addon requires Python 3)
+
+**Channels worked initially but stopped after a few days (Android)**
+- This was caused by IPTV Simple Client being configured with a local file path that it could not read from its own sandboxed process, so it kept using a stale `channels.m3u`. The addon now serves the playlist over a local HTTP URL instead, so no file copying is needed. Update to the latest version of this addon, open its settings and click OK once to force a reconfigure.

@@ -2,15 +2,18 @@
 Annatel IPTV — Kodi service addon
 
 Fetches the Annatel channel list, writes an M3U playlist to the addon
-profile directory, then configures and reloads pvr.iptvsimple automatically.
+profile directory, serves it over a local HTTP URL, then configures and
+reloads pvr.iptvsimple automatically.
 Refreshes every 4 hours.  Only settings: username + password.
 """
 
 import json
 import os
+import threading
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import xbmc
 import xbmcaddon
@@ -101,10 +104,47 @@ class Annatel:
             lines.append(f'#EXTINF:-1 tvg-logo="{ch["logo"]}",{ch["name"]}\n')
             lines.append(f'{ch["url"]}\n')
 
-        with open(M3U_PATH, 'w', encoding='utf-8') as fh:
+        # Write atomically so the HTTP handler below never serves a half-written file.
+        tmp_path = f'{M3U_PATH}.tmp'
+        with open(tmp_path, 'w', encoding='utf-8') as fh:
             fh.writelines(lines)
+        os.replace(tmp_path, M3U_PATH)
 
         return len(channels)
+
+
+# ---------------------------------------------------------------------------
+# M3U HTTP server
+# ---------------------------------------------------------------------------
+
+class _M3UHandler(BaseHTTPRequestHandler):
+    """Serves channels.m3u over loopback HTTP.
+
+    pvr.iptvsimple can run as a separate sandboxed process (notably on
+    Android, where binary add-ons cannot read files under another add-on's
+    special://profile directory). A local HTTP URL works regardless of
+    filesystem sandboxing, so we hand pvr.iptvsimple a URL instead of a
+    file path — this is what previously required manually copying
+    channels.m3u into Android/media after every refresh.
+    """
+
+    def do_GET(self) -> None:
+        try:
+            with open(M3U_PATH, 'rb') as fh:
+                body = fh.read()
+        except OSError:
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        self.send_response(200)
+        self.send_header('Content-Type', 'audio/x-mpegurl')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args) -> None:  # noqa: A002 — silence default access log
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -114,20 +154,27 @@ class Annatel:
 class IptvSimple:
     """Configures pvr.iptvsimple to use the generated M3U and reloads it."""
 
-    # Settings written to pvr.iptvsimple (string values as Kodi expects them).
-    _SETTINGS: dict[str, str] = {
-        # M3U source — local file, no remote URL, no auto-refresh (we handle it)
-        'm3uPathType':      '0',        # 0 = local file
-        'm3uPath':          M3U_PATH,
-        'm3uUrl':           '',
-        'm3uCache':         'false',
-        'm3uRefreshMode':   '0',        # 0 = disabled
-        # EPG — disabled
-        'epgPathType':      '0',
-        'epgPath':          '',
-        'epgUrl':           '',
-        'epgCache':         'false',
-    }
+    def __init__(self, m3u_url: str) -> None:
+        self.m3u_url = m3u_url
+
+    # ------------------------------------------------------------------
+
+    def _settings(self) -> dict[str, str]:
+        """Settings written to pvr.iptvsimple (string values as Kodi expects them)."""
+        return {
+            # M3U source — fetched over loopback HTTP from our own service,
+            # no auto-refresh (we handle it via force_reload)
+            'm3uPathType':      '1',        # 1 = remote URL
+            'm3uPath':          '',
+            'm3uUrl':           self.m3u_url,
+            'm3uCache':         'false',
+            'm3uRefreshMode':   '0',        # 0 = disabled
+            # EPG — disabled
+            'epgPathType':      '0',
+            'epgPath':          '',
+            'epgUrl':           '',
+            'epgCache':         'false',
+        }
 
     # ------------------------------------------------------------------
 
@@ -147,7 +194,7 @@ class IptvSimple:
     def _configure_via_addon_api(self) -> None:
         try:
             iptv_addon = xbmcaddon.Addon(IPTVSIMPLE_ID)
-            for key, value in self._SETTINGS.items():
+            for key, value in self._settings().items():
                 iptv_addon.setSetting(key, value)
         except Exception as exc:  # noqa: BLE001
             xbmc.log(f'[{ADDON_ID}] configure: {exc}', xbmc.LOGWARNING)
@@ -199,6 +246,12 @@ class Service:
     def __init__(self) -> None:
         self.monitor = _Monitor()
 
+        # Bind to an OS-assigned loopback port; re-announced to pvr.iptvsimple
+        # on every refresh, so a new port after a Kodi restart is picked up.
+        self.http_server = HTTPServer(('127.0.0.1', 0), _M3UHandler)
+        self.m3u_url = f'http://127.0.0.1:{self.http_server.server_address[1]}/channels.m3u'
+        threading.Thread(target=self.http_server.serve_forever, daemon=True).start()
+
     # ------------------------------------------------------------------
 
     def _log(self, message: str, level: int = xbmc.LOGINFO) -> None:
@@ -222,7 +275,7 @@ class Service:
         count = Annatel(username, password).generate_m3u_file()
         self._log(f'M3U written: {count} channels')
 
-        iptv = IptvSimple()
+        iptv = IptvSimple(self.m3u_url)
         iptv.configure()
         iptv.enable()
         iptv.force_reload()
@@ -233,6 +286,7 @@ class Service:
 
     def run(self) -> None:
         self._log('Service starting')
+        self._log(f'Serving M3U at {self.m3u_url}')
 
         while not self.monitor.abortRequested():
             try:
@@ -256,6 +310,7 @@ class Service:
                 self.monitor.waitForAbort(5)
                 waited += 5
 
+        self.http_server.shutdown()
         self._log('Service stopped')
 
 
